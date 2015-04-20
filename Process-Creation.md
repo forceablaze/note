@@ -13,7 +13,10 @@ Process 藉由 fork() system call來產生
 ### Process Descriptor
 Linux 把 process 存放在一個 circual doubly linked list
 , task list，process則是有個 Process Descriptor(PCB)來紀錄 process的資訊，在Linux裡叫 struct task_struct。下面來看看 task_struct長怎樣。
-defined in linux/sched.h
+defined in
+``` c
+<linux/sched.h>
+```
 ``` c
 struct task_struct {
 	volatile long state;	/* -1 unrunnable, 0 runnable, >0 stopped */
@@ -453,3 +456,291 @@ struct task_struct {
 };
 ```
 
+struct task_struct，被放在 process 的 kernel stack 的最後，因此可以藉由 stack pointer 來取得 PCB，
+不過在 2.6.22 以後已不用此方法。
+當 PCB allocaed，Linux 會一併 allocate struct thead_info，thread_info 會被 push 至 stask 的 top，
+而 thread_info 的第一個 member 則指向 task_struct。
+
+x86
+``` c
+<asm/thread_info>
+```
+
+``` c
+struct thread_info {
+	struct task_struct	*task;		/* main task structure */
+	struct exec_domain	*exec_domain;	/* execution domain */
+	__u32			flags;		/* low level flags */
+	__u32			status;		/* thread synchronous flags */
+	__u32			cpu;		/* current CPU */
+	int			saved_preempt_count;
+	mm_segment_t		addr_limit;
+	void __user		*sysenter_return;
+	unsigned int		sig_on_uaccess_error:1;
+	unsigned int		uaccess_err:1;	/* uaccess failed */
+};
+```
+
+x86
+``` c
+<asm/current.h>
+```
+
+``` c
+#ifndef __ASSEMBLY__
+struct task_struct;
+
+DECLARE_PER_CPU(struct task_struct *, current_task);
+
+static __always_inline struct task_struct *get_current(void)
+{
+	return this_cpu_read_stable(current_task);
+}
+
+#define current get_current()
+```
+
+每個 process 都有個 pid，type pid_t (int)
+``` bash
+cat /proc/sys/kernel/pid_max
+```
+可以知道最大的pid value
+
+實際上 maximum pid 定義在
+``` c
+<linux/threads.h>
+```
+``` c
+/*
+ * This controls the default maximum pid allocated to a process
+ */
+#define PID_MAX_DEFAULT (CONFIG_BASE_SMALL ? 0x1000 : 0x8000)
+
+/*
+ * A maximum of 4 million PIDs should be enough for a while.
+ * [NOTE: PID/TIDs are limited to 2^29 ~= 500+ million, see futex.h.]
+ */
+#define PID_MAX_LIMIT (CONFIG_BASE_SMALL ? PAGE_SIZE * 8 : \
+	(sizeof(long) > 4 ? 4 * 1024 * 1024 : PID_MAX_DEFAULT))
+
+/*
+ * Define a minimum number of pids per cpu.  Heuristically based
+ * on original pid max of 32k for 32 cpus.  Also, increase the
+ * minimum settable value for pid_max on the running system based
+ * on similar defaults.  See kernel/pid.c:pidmap_init() for details.
+ */
+#define PIDS_PER_CPU_DEFAULT	1024
+#define PIDS_PER_CPU_MIN	8
+```
+
+### Process State
+process state 定義在
+``` c
+<linux/sched.h>
+```
+
+``` c
+/*
+ * Task state bitmask. NOTE! These bits are also
+ * encoded in fs/proc/array.c: get_task_state().
+ *
+ * We have two separate sets of flags: task->state
+ * is about runnability, while task->exit_state are
+ * about the task exiting. Confusing, but this way
+ * modifying one set can't modify the other one by
+ * mistake.
+ */
+#define TASK_RUNNING		0
+#define TASK_INTERRUPTIBLE	1
+#define TASK_UNINTERRUPTIBLE	2
+#define __TASK_STOPPED		4
+#define __TASK_TRACED		8
+/* in tsk->exit_state */
+#define EXIT_DEAD		16
+#define EXIT_ZOMBIE		32
+#define EXIT_TRACE		(EXIT_ZOMBIE | EXIT_DEAD)
+/* in tsk->state again */
+#define TASK_DEAD		64
+#define TASK_WAKEKILL		128
+#define TASK_WAKING		256
+#define TASK_PARKED		512
+#define TASK_STATE_MAX		1024
+
+#define TASK_STATE_TO_CHAR_STR "RSDTtXZxKWP"
+
+extern char ___assert_task_state[1 - 2*!!(
+		sizeof(TASK_STATE_TO_CHAR_STR)-1 != ilog2(TASK_STATE_MAX)+1)];
+
+/* Convenience macros for the sake of set_task_state */
+#define TASK_KILLABLE		(TASK_WAKEKILL | TASK_UNINTERRUPTIBLE)
+#define TASK_STOPPED		(TASK_WAKEKILL | __TASK_STOPPED)
+#define TASK_TRACED		(TASK_WAKEKILL | __TASK_TRACED)
+
+/* Convenience macros for the sake of wake_up */
+#define TASK_NORMAL		(TASK_INTERRUPTIBLE | TASK_UNINTERRUPTIBLE)
+#define TASK_ALL		(TASK_NORMAL | __TASK_STOPPED | __TASK_TRACED)
+
+/* get_task_state() */
+#define TASK_REPORT		(TASK_RUNNING | TASK_INTERRUPTIBLE | \
+				 TASK_UNINTERRUPTIBLE | __TASK_STOPPED | \
+				 __TASK_TRACED | EXIT_ZOMBIE | EXIT_DEAD)
+```
+struct task_struct->state
+
++ TASK_RUNNING: The process is runnable, (running or watting to run)
++ TASK_INTERRUPTIBLE: The process is sleeping (blocking), wake up and become runnable if it receives a signal.
++ TASK_UNINTERRUPTIBLE: 與 TASK_INTERRUPTIBLE 很像，但他不會被因收到 signal 而變成 runnable
++ __TASK_TRACED: The process is being traced by another process, ex ptrace
++ __TASK_STOPPED: Process execution has stopped; the task is not running nor is it
+eligible to run.This occurs if the task receives the SIGSTOP, SIGTSTP, SIGTTIN, SIGTTOU signal or if it receives
+any signal while it is being debugged
+
+### Process Context
+process 是在 user-space 執行的，當呼叫到 system call，會進入 kernel-space，
+此時 kernel 是在 process-context，current macro 會指到 呼叫 system call 的 process。
+
+### Process Creation
+
+Linux 藉由fork(), exec() 來完成 process 的 creation。
+fork() 會 copy 一份 task_struct，更新 PID, PPID, 以及一些。
+最後exec() 會載入 executable 至 address space然後執行。
+
+### Copy-on-Write
+
+### Forking
+fork(), 主要由 clone() system call 實作，clone() 則是呼叫 do_fork()。
+
+linux/kernel/fork.c
+``` c
+
+/*
+ *  Ok, this is the main fork-routine.
+ *
+ * It copies the process, and if successful kick-starts
+ * it and waits for it to finish using the VM if required.
+ */
+long do_fork(unsigned long clone_flags,
+	      unsigned long stack_start,
+	      unsigned long stack_size,
+	      int __user *parent_tidptr,
+	      int __user *child_tidptr)
+{
+	struct task_struct *p;
+	int trace = 0;
+	long nr;
+
+	/*
+	 * Determine whether and which event to report to ptracer.  When
+	 * called from kernel_thread or CLONE_UNTRACED is explicitly
+	 * requested, no event is reported; otherwise, report if the event
+	 * for the type of forking is enabled.
+	 */
+	if (!(clone_flags & CLONE_UNTRACED)) {
+		if (clone_flags & CLONE_VFORK)
+			trace = PTRACE_EVENT_VFORK;
+		else if ((clone_flags & CSIGNAL) != SIGCHLD)
+			trace = PTRACE_EVENT_CLONE;
+		else
+			trace = PTRACE_EVENT_FORK;
+
+		if (likely(!ptrace_event_enabled(current, trace)))
+			trace = 0;
+	}
+
+	p = copy_process(clone_flags, stack_start, stack_size,
+			 child_tidptr, NULL, trace);
+	/*
+	 * Do this prior waking up the new thread - the thread pointer
+	 * might get invalid after that point, if the thread exits quickly.
+	 */
+	if (!IS_ERR(p)) {
+		struct completion vfork;
+		struct pid *pid;
+
+		trace_sched_process_fork(current, p);
+
+		pid = get_task_pid(p, PIDTYPE_PID);
+		nr = pid_vnr(pid);
+
+		if (clone_flags & CLONE_PARENT_SETTID)
+			put_user(nr, parent_tidptr);
+
+		if (clone_flags & CLONE_VFORK) {
+			p->vfork_done = &vfork;
+			init_completion(&vfork);
+			get_task_struct(p);
+		}
+
+		wake_up_new_task(p);
+
+		/* forking complete and child started to run, tell ptracer */
+		if (unlikely(trace))
+			ptrace_event_pid(trace, pid);
+
+		if (clone_flags & CLONE_VFORK) {
+			if (!wait_for_vfork_done(p, &vfork))
+				ptrace_event_pid(PTRACE_EVENT_VFORK_DONE, pid);
+		}
+
+		put_pid(pid);
+	} else {
+		nr = PTR_ERR(p);
+	}
+	return nr;
+}
+```
+在 do_fork() 中看到了 copy_process()，這裡開始產稱一個 process。
+copy_process() 主要會作：
+1. calls dup_task_struct(), which creates a new kernel stack, thread_info, task_struct.
+kernel stack 的大小為 THREAD_SIZE(2 * PAGE_SIZE)
+2. 確認新的 process 不會超出user 使用的 process 個數的限制，以及 resource的限制。
+3. initialize task_struct 的 member。
+4. 把 process state 設為 TASK_UNINTERRUPTIBLE，確保不會被執行。(我找不到這段code)
+5. update task_struct->flags
+6. 根據 clone() 的 flags 來決定哪些 resource 要 copy。
+``` c
+	/* clear superuser privilege and worker flag */
+	p->flags &= ~(PF_SUPERPRIV | PF_WQ_WORKER);
+	/* 表示尚未 exec() */
+	p->flags |= PF_FORKNOEXEC;
+
+```
+7. return task_struct
+8. calls alloc_pid()
+
+回到do_fork(), wake up new process and run。
+
+### vfork:
++ 在copy_process()裡的copy_mm()，不會 copy task_struct->mm
+``` c
+	if (clone_flags & CLONE_VM) {
+		atomic_inc(&oldmm->mm_users);
+		mm = oldmm;
+		goto good_mm;
+	}
+```
++ 會assign vfork_done，
++ child 執行後，parent 會等待 vfork_done，直到 vfork_done completion，並送出 signal
+``` c
+		if (clone_flags & CLONE_VFORK) {
+			if (!wait_for_vfork_done(p, &vfork))
+				ptrace_event_pid(PTRACE_EVENT_VFORK_DONE, pid);
+		}
+```
+
+``` c
+// x86 asm/page_32_types.h
+#define THREAD_SIZE_ORDER	1
+#define THREAD_SIZE		(PAGE_SIZE << THREAD_SIZE_ORDER)
+
+// x86_64 asm/page_64_types.h
+#ifdef CONFIG_KASAN
+#define KASAN_STACK_ORDER 1
+#else
+#define KASAN_STACK_ORDER 0
+#endif
+
+#define THREAD_SIZE_ORDER	(2 + KASAN_STACK_ORDER)
+#define THREAD_SIZE  (PAGE_SIZE << THREAD_SIZE_ORDER)
+#define CURRENT_MASK (~(THREAD_SIZE - 1))
+```
