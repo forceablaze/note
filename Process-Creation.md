@@ -8,7 +8,6 @@ Processes are, however, more than just the executing program code (often called 
 Processes, in effect, are the living result of running program code.The kernel needs to manage all these details efficiently and transparently. Threads of execution, often shortened to thread
 
 [Process and Thread in Linux](https://kerker-notes.hackpad.com/process-thread-9UEQ2LVPjzv)
-Process 藉由 fork() system call來產生
 
 ### Process Descriptor
 Linux 把 process 存放在一個 circual doubly linked list
@@ -744,3 +743,10 @@ kernel stack 的大小為 THREAD_SIZE(2 * PAGE_SIZE)
 #define THREAD_SIZE  (PAGE_SIZE << THREAD_SIZE_ORDER)
 #define CURRENT_MASK (~(THREAD_SIZE - 1))
 ```
+寫個 fork 程式來確認一下使用到的 參數
+可以利用 strace 來 trace system call。
+``` bash
+clone(child_stack=0, flags=CLONE_CHILD_CLEARTID|CLONE_CHILD_SETTID|SIGCHLD, child_tidptr=0x7fc28d9089d0) = 22146
+```
+C library 的 fork 使用的是 clone()，
+flags = CLONE_CHILD_CREARTID | CLONE_CHILD_SETTID | SIGCHILD
